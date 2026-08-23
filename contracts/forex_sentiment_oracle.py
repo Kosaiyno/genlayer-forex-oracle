@@ -61,20 +61,20 @@ class ForexSentimentOracle(gl.Contract):
             raise ValueError(f"Pair '{clean_pair}' is not tracked")
 
         def get_input() -> str:
-            # Fetch live web market rates/news context using GenLayer's non-deterministic web module
-            web_data = ""
+            # Fetch live web data using GenLayer's non-deterministic web module
             try:
                 base_curr = clean_pair[:3]
                 url = f"https://open.er-api.com/v6/latest/{base_curr}"
-                live_feed = gl.nondet.web.get(url)
-                web_data = f"Live Market Data Payload: {live_feed}"
+                resp = gl.nondet.web.get(url)
+                body_text = resp.body.decode("utf-8") if hasattr(resp, "body") else str(resp)
+                web_data = f"Live FX Payload: {body_text[:300]}"
             except Exception:
                 web_data = f"Live Market News Context for {clean_pair}"
 
             return (
                 f"Perform a live market sentiment evaluation for the Forex/Commodity pair: {clean_pair}.\n"
                 f"Fetched Web Context: {web_data}\n"
-                f"Analyze key fundamental drivers, central bank interest rate expectations, macro trends, "
+                f"Analyze fundamental drivers, central bank interest rate expectations, macro trends, "
                 f"and technical momentum for {clean_pair} based on this live market data."
             )
 
