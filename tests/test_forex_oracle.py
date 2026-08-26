@@ -17,7 +17,15 @@ class u256(int):
 
 class MockGL:
     class Contract:
-        pass
+        def __init_subclass__(cls):
+            super().__init_subclass__()
+
+        def __new__(cls, *args, **kwargs):
+            obj = super().__new__(cls)
+            obj.tracked_pairs = DynArray()
+            obj.latest_signals = TreeMap()
+            obj.total_updates = u256(0)
+            return obj
 
     class Public:
         def view(self, func):

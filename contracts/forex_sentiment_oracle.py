@@ -16,12 +16,10 @@ class ForexSentimentOracle(gl.Contract):
 
     def __init__(self):
         self.owner = "0x0000000000000000000000000000000000000000"
-        self.tracked_pairs = DynArray()
         self.tracked_pairs.append("EURUSD")
         self.tracked_pairs.append("GBPUSD")
         self.tracked_pairs.append("USDJPY")
         self.tracked_pairs.append("XAUUSD")
-        self.latest_signals = TreeMap()
         self.total_updates = u256(0)
 
     @gl.public.view
