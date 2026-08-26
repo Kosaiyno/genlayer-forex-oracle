@@ -7,64 +7,65 @@ class ForexSentimentOracle(gl.Contract):
     ForexSentimentOracle is a GenLayer Intelligent Contract that leverages on-chain AI
     and the GenLayer Equivalence Principle to evaluate financial market sentiment.
 
-    Validators independently verify proposed sentiment signals directly against acquired
-    live market evidence, failing safely if live evidence is unavailable.
+    Uses official GenLayer persistent storage structures: DynArray and TreeMap.
     """
+    owner: str
+    tracked_pairs: DynArray[str]
+    latest_signals: TreeMap[str, str]
+    total_updates: u256
 
     def __init__(self):
         self.owner = "0x0000000000000000000000000000000000000000"
-        self.tracked_pairs = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]
-        self.latest_signals = {}
-        self.total_updates = 0
+        self.tracked_pairs = DynArray(["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"])
+        self.latest_signals = TreeMap()
+        self.total_updates = u256(0)
 
     @gl.public.view
-    def get_tracked_pairs(self) -> list[str]:
-        """Returns the list of currency/commodity pairs currently tracked by the oracle."""
-        return self.tracked_pairs
+    def get_tracked_pairs(self) -> list:
+        result = []
+        for i in range(len(self.tracked_pairs)):
+            result.append(self.tracked_pairs[i])
+        return result
 
     @gl.public.view
     def get_signal(self, pair: str) -> str:
-        pair_key = str(pair).upper().strip()
-        if pair_key in self.latest_signals:
-            return str(self.latest_signals[pair_key])
-        return "No signal recorded for " + pair_key
+        clean_pair = str(pair).upper().strip()
+        if clean_pair in self.latest_signals:
+            return str(self.latest_signals[clean_pair])
+        return "No signal recorded for " + clean_pair
 
     @gl.public.view
     def get_all_signals(self) -> str:
-        """Returns all recorded sentiment signals for all tracked pairs."""
-        if not self.latest_signals:
+        if len(self.latest_signals) == 0:
             return "No signals recorded yet"
         return str(self.latest_signals)
 
     @gl.public.view
     def get_stats(self) -> str:
-        """Returns contract health and operational metrics."""
         return "Owner: " + str(self.owner) + " | Pairs Count: " + str(len(self.tracked_pairs)) + " | Total Updates: " + str(self.total_updates)
 
     @gl.public.write
     def add_currency_pair(self, pair: str) -> bool:
-        """
-        Adds a new currency or commodity pair to the oracle tracking list.
-        """
         clean_pair = str(pair).upper().strip()
-        if clean_pair not in self.tracked_pairs:
-            self.tracked_pairs.append(clean_pair)
-            return True
-        return False
+        for i in range(len(self.tracked_pairs)):
+            if self.tracked_pairs[i] == clean_pair:
+                return False
+        self.tracked_pairs.append(clean_pair)
+        return True
 
     @gl.public.write
     def update_sentiment(self, pair: str) -> str:
-        """
-        Uses GenLayer's Equivalence Principle (prompt_non_comparative) to have validators
-        independently verify sentiment signals against acquired market evidence.
-        Fails safely if live evidence is unavailable.
-        """
         clean_pair = str(pair).upper().strip()
-        if clean_pair not in self.tracked_pairs:
+        is_tracked = False
+        for i in range(len(self.tracked_pairs)):
+            if self.tracked_pairs[i] == clean_pair:
+                is_tracked = True
+                break
+
+        if not is_tracked:
             raise ValueError(f"Pair '{clean_pair}' is not tracked")
 
         def get_input() -> str:
-            # Fetch live web data using GenLayer's non-deterministic web module
             base_curr = clean_pair[:3]
             url = f"https://open.er-api.com/v6/latest/{base_curr}"
 
@@ -72,7 +73,6 @@ class ForexSentimentOracle(gl.Contract):
                 resp = gl.nondet.web.get(url)
                 body_text = resp.body.decode("utf-8") if hasattr(resp, "body") else str(resp)
             except Exception as e:
-                # Fail safely: raise exception when live market evidence is unavailable
                 raise RuntimeError(f"Market evidence fetch failed for {clean_pair}: {str(e)}")
 
             if not body_text or len(body_text.strip()) == 0 or "rates" not in body_text:
@@ -84,7 +84,6 @@ class ForexSentimentOracle(gl.Contract):
                 f"Instructions: Evaluate the sentiment signal for {clean_pair} derived strictly from this acquired market evidence."
             )
 
-        # Leader node generates the evaluation using AI, and validators independently check signal against evidence
         raw_result = gl.eq_principle.prompt_non_comparative(
             get_input,
             task=(
@@ -103,9 +102,8 @@ class ForexSentimentOracle(gl.Contract):
             """,
         )
 
-        # Record validated signal into persistent state
         analysis_str = str(raw_result)
         self.latest_signals[clean_pair] = analysis_str
-        self.total_updates += 1
+        self.total_updates = u256(int(self.total_updates) + 1)
 
         return analysis_str

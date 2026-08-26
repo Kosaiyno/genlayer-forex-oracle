@@ -1,12 +1,19 @@
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock
 
-# Create a stub/mock genlayer module for local unit testing if genlayer SDK is not installed
 class MockWebResponse:
     def __init__(self, body_text):
         self.body = body_text.encode("utf-8")
+
+class DynArray(list):
+    pass
+
+class TreeMap(dict):
+    pass
+
+class u256(int):
+    pass
 
 class MockGL:
     class Contract:
@@ -20,7 +27,6 @@ class MockGL:
 
     class EqPrinciple:
         def prompt_non_comparative(self, get_input, task, criteria):
-            # Execute get_input to ensure web fetching and validation inside get_input is exercised
             prompt_input = get_input()
             return '{"signal": "BULLISH", "confidence": 85, "evidence_quote": "rates: USD 1.085", "rationale": "Strong macroeconomic indicators and hawkish rate trajectory."}'
 
@@ -41,6 +47,9 @@ gl_mock.nondet = MockGL.NonDet()
 gl_mock.nondet.web = MockGL.NonDet.Web()
 gl_mock.gl = gl_mock
 gl_mock.Contract = MockGL.Contract
+gl_mock.DynArray = DynArray
+gl_mock.TreeMap = TreeMap
+gl_mock.u256 = u256
 
 sys.modules['genlayer'] = gl_mock
 
@@ -72,6 +81,10 @@ class TestForexSentimentOracle(unittest.TestCase):
 
     def test_update_sentiment_success(self):
         result = self.oracle.update_sentiment("EURUSD")
+        print("\n" + "="*60)
+        print("EXACT RAW AI SENTIMENT ANALYSIS RETURNED BY CONTRACT:")
+        print(result)
+        print("="*60 + "\n")
         self.assertIn("BULLISH", result)
         self.assertIn("evidence_quote", result)
         
@@ -81,7 +94,6 @@ class TestForexSentimentOracle(unittest.TestCase):
         self.assertIn("Total Updates: 1", self.oracle.get_stats())
 
     def test_update_sentiment_fails_safely_when_web_fetch_fails(self):
-        # Trigger simulated network/web fetch failure
         gl_mock.nondet.web.should_fail = True
         with self.assertRaises(RuntimeError) as ctx:
             self.oracle.update_sentiment("EURUSD")
