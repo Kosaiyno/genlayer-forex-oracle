@@ -1,117 +1,96 @@
-# GenLayer Forex & Commodity Sentiment Oracle 📈🤖
+# Forex & Commodity AI Sentiment Oracle Intelligent Contract 📈🤖
 
-An **Intelligent Smart Contract** built on [GenLayer](https://genlayer.com) that leverages on-chain AI and GenLayer's **Equivalence Principle** to perform consensus-validated financial market sentiment analysis for major Forex currency pairs and commodities (`EURUSD`, `GBPUSD`, `USDJPY`, `XAUUSD`).
-
----
-
-## 🌟 Key Features
-
-- **Live Web Data Fetching:** Natively calls live external market APIs/feeds using `gl.nondet.web.get(...)` inside non-deterministic blocks prior to LLM evaluation.
-- **On-Chain AI Execution:** Evaluates macro sentiment, central bank monetary policy shifts, and technical momentum directly within smart contract state.
-- **GenLayer Equivalence Principle:** Uses `gl.eq_principle.prompt_non_comparative` where validator nodes independently verify candidate AI sentiment evaluations against strict quality criteria before storing on-chain.
-- **Deterministic Consensus:** Converts non-deterministic LLM reasoning into verifiable, deterministic on-chain data records (`BULLISH`, `BEARISH`, `NEUTRAL`, `confidence`, `rationale`).
-- **Dynamic Asset Registry:** Owner can dynamically add new currency/commodity trading pairs (`add_currency_pair`).
+A production-grade, multi-round **GenLayer Intelligent Contract** deployed on GenVM. It implements a structured oracle lifecycle for Foreign Exchange (EUR/USD, GBP/USD, USD/JPY) and Commodity (XAU/USD) markets, combining live pair-specific data ingestion, on-chain historical baseline tracking, directional momentum evaluation, and 20-validator AI consensus.
 
 ---
 
-## 🏗️ Architecture & Equivalence Principle
+## 🏛️ Structured Oracle Lifecycle Architecture
 
-Unlike traditional EVM smart contracts that rely on external off-chain web2 oracles, GenLayer Intelligent Contracts run natively inside **GenVM** (Python 3.12+ execution environment). 
+Unlike naive single-prompt contracts, **ForexSentimentOracle** implements a formal multi-round state machine:
 
 ```
-+------------------+         +-------------------------------+         +----------------------------+
-| Contract Call    | ------> | Leader Node LLM Evaluation    | ------> | Validator Consensus Check  |
-| update_sentiment |         | Generates raw market summary  |         | (prompt_non_comparative)   |
-+------------------+         +-------------------------------+         +----------------------------+
-                                                                                     |
-                                                                                     v
-                                                                       +----------------------------+
-                                                                       | Verified Signal Stored     |
-                                                                       | self.latest_signals[pair]  |
-                                                                       +----------------------------+
-```
-
-### Equivalence Principle Method Used: `prompt_non_comparative`
-
-```python
-raw_result = gl.eq_principle.prompt_non_comparative(
-    get_input,
-    task="Act as a financial analyst... Output JSON with signal, confidence, rationale.",
-    criteria="""
-        Output must be valid JSON or clear key-value format.
-        Signal must be BULLISH, BEARISH, or NEUTRAL.
-        Confidence must be an integer between 0 and 100.
-        Rationale must be a concise explanation (max 2 sentences).
-    """
-)
+┌────────────────────────────────────────────────────────────────────────┐
+│ 1. INGESTION & DATA RESOLUTION (gl.nondet.web.get)                     │
+│    • Target Pair: Extracts exact Base & Quote rates (e.g. EUR -> USD)   │
+│    • Zero Truncation: Explicitly parses full JSON payload              │
+│    • Historical Baseline: Retrieves previous round rate from on-chain   │
+│      storage (or genesis calibration if round #1)                      │
+│    • Directional Momentum: Computes basis point delta (delta_bps) &   │
+│      momentum direction (UPWARD / DOWNWARD / FLAT_CONSOLIDATION)       │
+│    • Macro Context: Injects central bank monetary policy stance        │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ 2. INDEPENDENT VALIDATOR CONSENSUS (gl.eq_principle)                   │
+│    • 20 GenLayer validators independently evaluate the evidence        │
+│    • Evidentiary Grounding Rule: Signals MUST strictly align with the  │
+│      mathematical directional delta (e.g. negative bps cannot be BULLISH)│
+│    • Exact Quote Extraction: Requires explicit timestamped rate quote  │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ 3. ON-CHAIN ROUND FINALIZATION & ARCHIVE                               │
+│    • Increments round_counter (Round 1, Round 2, Round 3...)           │
+│    • Updates pair_latest_rate_e6 (scaled integer for DeFi consumption) │
+│    • Stores complete round history in oracle_rounds[pair:round_id]     │
+│    • Exposes consumer methods: get_latest_round(), get_round_by_id(),   │
+│      get_price_e6(), and get_round_count()                             │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🚀 Quickstart & Testing
+## ⚡ Key Technical Features
 
-### 1. Prerequisites
-- Python 3.12+
-- `pytest` or Python `unittest`
+1. **Pair-Specific Ingestion (Zero Truncation Omission)**:
+   Explicitly parses target quote currencies directly from JSON objects. Avoids raw character slicing that drops alphabetic currency keys.
+2. **On-Chain Historical Tracking & Directional Delta**:
+   Maintains previous round rates in `pair_latest_rate_e6`. Every new round compares the live rate against this stored baseline, computing `delta_bps` (basis points) and momentum direction to quantitatively justify sentiment calls.
+3. **Macroeconomic Monetary Context**:
+   Synthesizes live rate deltas with central bank policy stances (ECB, Fed, BoE, BoJ) for robust macro analysis.
+4. **Structured Multi-Round Storage**:
+   Uses official GenLayer persistent types (`DynArray[str]`, `TreeMap[str, str]`, `u256`). Archives every historical round permanently on-chain.
+5. **DeFi Consumer Ready**:
+   Provides standard price getters (`get_price_e6`) returning integer-scaled prices ($10^6$) for direct consumption by lending protocols, perp DEXs, or automated vaults.
 
-### 2. Run Local Unit Tests
-```bash
-python tests/test_forex_oracle.py
-```
-*Output:*
+---
+
+## 📂 Repository Layout
+
 ```text
-Ran 5 tests in 0.002s
+genlayer-forex-oracle/
+├── contracts/
+│   └── forex_sentiment_oracle.py     # Pinned GenVM Intelligent Contract
+├── tests/
+│   └── test_forex_oracle.py          # Automated Unit Test Suite (7/7 Passing)
+├── GENLAYER_CONTRACT_CHEATSHEET.md   # GenVM Development Reference
+└── README.md                         # Protocol Documentation
+```
+
+---
+
+## 🧪 Testing & Verification
+
+Run the test suite locally with Python 3.14+:
+
+```bash
+python3.14 tests/test_forex_oracle.py
+```
+
+Expected output:
+```text
+Ran 7 tests in 0.000s
 OK
 ```
 
 ---
 
-## 📜 Contract API Reference
+## 🚀 Deployed Contract & Studio Instructions
 
-### View Methods (`@gl.public.view`)
-- `get_tracked_pairs() -> list[str]`: Returns list of monitored pairs.
-- `get_signal(pair: str) -> dict`: Returns the latest validated sentiment record for a given pair.
-- `get_all_signals() -> dict`: Returns all recorded signals.
-- `get_stats() -> dict`: Returns oracle metadata (owner, pair count, total update count).
-
-### Write Methods (`@gl.public.write`)
-- `update_sentiment(pair: str) -> dict`: Triggers AI sentiment evaluation & validator consensus for `pair`.
-- `add_currency_pair(pair: str) -> bool`: Registers a new currency/commodity pair.
-
----
-
-## 🌐 Deploying to GenLayer
-
-### Option A: GenLayer Studio (Browser)
-1. Open [GenLayer Studio](https://studio.genlayer.com).
-2. Copy contents of `contracts/forex_sentiment_oracle.py` into a new contract file.
-3. Click **Deploy**.
-4. Test calling `update_sentiment("EURUSD")`.
-
-### Option B: GenLayer CLI
-```bash
-# Install CLI
-npm install -g genlayer
-
-# Lint contract syntax
-genvm-lint check contracts/forex_sentiment_oracle.py
-
-# Deploy to testnet
-genlayer deploy contracts/forex_sentiment_oracle.py
-```
-
----
-
-## 🎖️ GenLayer Builder Program Submission
-
-This repository was created as an **Intelligent Contract** contribution for the GenLayer Builders Program.
-
-- **Builder Portal:** [points.genlayer.foundation](https://points.genlayer.foundation)
-- **Category:** Intelligent Contract Deployment & Code Base
-- **Contract Name:** `ForexSentimentOracle`
-- **GenVM Spec:** `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`
-
----
-
-## 📄 License
-MIT License.
+1. Open **GenLayer Studio**.
+2. Paste `contracts/forex_sentiment_oracle.py` into `storage.py`.
+3. Click **Deploy new instance**.
+4. Under **Write Methods**, call `request_oracle_update("EURUSD")`.
+5. Under **Read Methods**, inspect `get_latest_round("EURUSD")` and `get_price_e6("EURUSD")`.
