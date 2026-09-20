@@ -24,6 +24,7 @@ class MockGL:
             obj.pair_round_count = TreeMap()
             obj.pair_latest_round_id = TreeMap()
             obj.pair_latest_rate_e6 = TreeMap()
+            obj.pair_latest_timestamp = TreeMap()
             obj.oracle_rounds = TreeMap()
             obj.round_counter = u256(0)
             return obj
@@ -37,19 +38,43 @@ class MockGL:
     class EqPrinciple:
         def prompt_non_comparative(self, get_input, task, criteria):
             prompt_input = get_input()
-            # Extract current rate from prompt input to produce grounded response
-            rate = "1.147761"
-            if "1 EUR = " in prompt_input:
-                rate = prompt_input.split("1 EUR = ")[1].split(" ")[0]
             
+            # Extract current spot rate from prompt input
+            rate = "1.147761"
+            if "Verified Spot Rate: 1 EUR = " in prompt_input:
+                rate = prompt_input.split("Verified Spot Rate: 1 EUR = ")[1].split(" ")[0]
+
+            # Check if this is Round 2 (has historical delta)
+            delta_bps = 0
+            direction = "CONSOLIDATION"
+            signal = "NEUTRAL"
+            if "Delta: " in prompt_input and "bps" in prompt_input:
+                try:
+                    delta_str = prompt_input.split("Delta: ")[1].split("(")[1].split(" bps")[0]
+                    delta_bps = int(delta_str)
+                    if delta_bps >= 25:
+                        direction = "UPWARD"
+                        signal = "BULLISH"
+                    elif delta_bps <= -25:
+                        direction = "DOWNWARD"
+                        signal = "BEARISH"
+                except Exception:
+                    pass
+
             return json.dumps({
-                "signal": "BULLISH",
-                "confidence": 88,
+                "round_id": 1,
+                "pair": "EURUSD",
                 "rate": rate,
-                "delta_bps": 24,
-                "direction": "UPWARD",
-                "evidence_quote": f"rates.USD = {rate} at Sat, 19 Sep 2026 00:02:31 +0000",
-                "rationale": "Upward momentum confirmed by basis point delta with favorable macroeconomic rate differentials."
+                "baseline_rate": "1.145000" if delta_bps != 0 else rate,
+                "delta_bps": delta_bps,
+                "direction": direction,
+                "macro_score": 0.0,
+                "composite_score": round((delta_bps / 100.0) * 0.6, 2),
+                "signal": signal,
+                "confidence": 88,
+                "evidence_quote": f"Verified Spot Rate: 1 EUR = {rate} USD, Delta: {delta_bps:+d} bps",
+                "rationale": "Quantitatively evaluated via two-pillar framework combining basis point momentum and central bank yield differentials.",
+                "status": "RESOLVED"
             })
 
     class NonDet:
@@ -63,7 +88,8 @@ class MockGL:
                 return MockWebResponse(json.dumps({
                     "result": "success",
                     "base_code": "EUR",
-                    "time_last_update_utc": "Sat, 19 Sep 2026 00:02:31 +0000",
+                    "time_last_update_utc": "Sat, 20 Sep 2026 00:02:31 +0000",
+                    "time_last_update_unix": 1789862551,
                     "rates": {
                         "USD": 1.147761,
                         "GBP": 0.858506,
@@ -105,66 +131,67 @@ class TestForexSentimentOracle(unittest.TestCase):
         res = self.oracle.add_currency_pair("BTCUSD")
         self.assertTrue(res)
         self.assertIn("BTCUSD", self.oracle.get_tracked_pairs())
-        # Duplicate should return False
         self.assertFalse(self.oracle.add_currency_pair("BTCUSD"))
 
-    def test_get_round_empty(self):
+    def test_empty_oracle_state(self):
         round_info = self.oracle.get_latest_round("EURUSD")
         self.assertIn("No oracle round recorded for EURUSD", round_info)
         self.assertEqual(self.oracle.get_price_e6("EURUSD"), 0)
         self.assertEqual(self.oracle.get_round_count("EURUSD"), 0)
+        self.assertTrue(self.oracle.is_round_stale("EURUSD", 3600))
 
-    def test_request_oracle_update_round_1_genesis(self):
-        result = self.oracle.request_oracle_update("EURUSD")
+    def test_request_round_1_genesis_calibration(self):
+        result = self.oracle.request_round("EURUSD")
         print("\n" + "="*65)
-        print("ROUND 1 ORACLE RESOLUTION:")
+        print("GENESIS ORACLE ROUND 1 RESOLUTION:")
         print(result)
         print("="*65 + "\n")
 
-        self.assertIn("BULLISH", result)
+        self.assertIn("EURUSD", result)
         self.assertIn("1.147761", result)
-        self.assertIn("evidence_quote", result)
+        self.assertIn("RESOLVED", result)
 
-        # Check state updates
+        # Verify state updates
         self.assertEqual(self.oracle.round_counter, 1)
         self.assertEqual(self.oracle.get_round_count("EURUSD"), 1)
         price_e6 = self.oracle.get_price_e6("EURUSD")
         self.assertEqual(price_e6, 1147761)
 
-        # Check round query
-        round_1_data = self.oracle.get_round_by_id("EURUSD", 1)
-        self.assertIn("1.147761", round_1_data)
+        # Verify latest round reader
+        latest = self.oracle.get_latest_round("EURUSD")
+        self.assertIn("1.147761", latest)
 
-    def test_request_oracle_update_multi_round_lifecycle(self):
-        # Round 1
-        res1 = self.oracle.request_oracle_update("EURUSD")
+    def test_multi_round_historical_delta_lifecycle(self):
+        # Execute Round 1 (calibrates genesis rate)
+        res1 = self.oracle.request_round("EURUSD")
         self.assertEqual(self.oracle.round_counter, 1)
+        self.assertEqual(self.oracle.get_round_count("EURUSD"), 1)
 
-        # Round 2 (uses Round 1 as historical on-chain baseline)
-        res2 = self.oracle.request_oracle_update("EURUSD")
+        # Execute Round 2 (retrieves Round 1 baseline, calculates delta)
+        res2 = self.oracle.request_round("EURUSD")
         print("\n" + "="*65)
-        print("ROUND 2 ORACLE RESOLUTION (WITH HISTORICAL BASELINE):")
+        print("ROUND 2 RESOLUTION WITH ON-CHAIN HISTORICAL DELTA:")
         print(res2)
         print("="*65 + "\n")
 
         self.assertEqual(self.oracle.round_counter, 2)
         self.assertEqual(self.oracle.get_round_count("EURUSD"), 2)
 
-        # Verify historical archive contains both rounds
+        # Verify both rounds exist permanently in historical archive
         r1 = self.oracle.get_round_by_id("EURUSD", 1)
         r2 = self.oracle.get_round_by_id("EURUSD", 2)
-        self.assertTrue(len(r1) > 0)
-        self.assertTrue(len(r2) > 0)
+        self.assertIn("RESOLVED", r1)
+        self.assertIn("RESOLVED", r2)
 
     def test_fails_safely_when_web_fetch_fails(self):
         gl_mock.nondet.web.should_fail = True
         with self.assertRaises(RuntimeError) as ctx:
-            self.oracle.request_oracle_update("EURUSD")
+            self.oracle.request_round("EURUSD")
         self.assertIn("Live market evidence fetch failed", str(ctx.exception))
 
     def test_untracked_pair_raises_error(self):
         with self.assertRaises(ValueError):
-            self.oracle.request_oracle_update("UNKNOWNPAIR")
+            self.oracle.request_round("UNTRACKED_PAIR")
 
 if __name__ == "__main__":
     unittest.main()
