@@ -4,6 +4,10 @@ import typing
 import json
 import xml.etree.ElementTree as ET
 
+def _clean_pair(pair: str) -> str:
+    """Normalizes symbol representations like EUR/USD, EUR-USD, eur_usd to EURUSD."""
+    return str(pair).upper().replace("/", "").replace("-", "").replace("_", "").strip()
+
 class ForexSentimentOracle(gl.Contract):
     """
     ForexSentimentOracle is a production-grade GenLayer Intelligent Contract
@@ -29,10 +33,12 @@ class ForexSentimentOracle(gl.Contract):
        - get_latest_signal(pair) -> immediate 'BULLISH', 'BEARISH', or 'NEUTRAL' string.
        - get_latest_timestamp(pair) -> on-chain stored Unix timestamp of latest round.
        - is_round_stale(pair, max_age_seconds) -> protocol liquidation / safety freshness check.
+       - is_round_stale_at(pair, timestamp, max_age_seconds) -> explicit timestamp freshness check.
        - get_latest_round(pair), get_round_by_id(pair, id), get_round_count(pair).
-    5. Access Control:
+    5. Access Control & Ownership:
        - Contract owner initialized to deployer (gl.message.sender_address).
        - Only owner can register new currency or commodity pairs.
+       - Supports transfer_ownership for enterprise governance.
     """
     owner: Address
     tracked_pairs: DynArray[str]
@@ -73,21 +79,21 @@ class ForexSentimentOracle(gl.Contract):
 
     @gl.public.view
     def get_price_e6(self, pair: str) -> u256:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         if clean_pair in self.pair_latest_rate_e6:
             return self.pair_latest_rate_e6[clean_pair]
         return u256(0)
 
     @gl.public.view
     def get_latest_timestamp(self, pair: str) -> u256:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         if clean_pair in self.pair_latest_timestamp:
             return self.pair_latest_timestamp[clean_pair]
         return u256(0)
 
     @gl.public.view
     def get_latest_signal(self, pair: str) -> str:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         if clean_pair not in self.pair_latest_round_id:
             return "NONE"
         latest_id = str(self.pair_latest_round_id[clean_pair])
@@ -102,7 +108,7 @@ class ForexSentimentOracle(gl.Contract):
 
     @gl.public.view
     def get_latest_round(self, pair: str) -> str:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         if clean_pair not in self.pair_latest_round_id:
             return "No oracle round recorded for " + clean_pair
         latest_id = str(self.pair_latest_round_id[clean_pair])
@@ -113,7 +119,7 @@ class ForexSentimentOracle(gl.Contract):
 
     @gl.public.view
     def get_round_by_id(self, pair: str, round_id: int) -> str:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         round_key = clean_pair + ":" + str(round_id)
         if round_key in self.oracle_rounds:
             return str(self.oracle_rounds[round_key])
@@ -121,14 +127,14 @@ class ForexSentimentOracle(gl.Contract):
 
     @gl.public.view
     def get_round_count(self, pair: str) -> u256:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         if clean_pair in self.pair_round_count:
             return self.pair_round_count[clean_pair]
         return u256(0)
 
     @gl.public.view
     def is_round_stale(self, pair: str, max_age_seconds: int) -> bool:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         if clean_pair not in self.pair_latest_timestamp:
             return True
         last_ts = int(self.pair_latest_timestamp[clean_pair])
@@ -142,12 +148,23 @@ class ForexSentimentOracle(gl.Contract):
             pass
         return False
 
+    @gl.public.view
+    def is_round_stale_at(self, pair: str, current_timestamp: int, max_age_seconds: int) -> bool:
+        clean_pair = _clean_pair(pair)
+        if clean_pair not in self.pair_latest_timestamp:
+            return True
+        last_ts = int(self.pair_latest_timestamp[clean_pair])
+        if last_ts == 0:
+            return True
+        if current_timestamp > last_ts:
+            return (current_timestamp - last_ts) > max_age_seconds
+        return False
+
     @gl.public.write
     def add_currency_pair(self, pair: str) -> bool:
         if gl.message.sender_address != self.owner:
             raise Exception("Only contract owner can add tracked currency pairs")
-        clean_pair = str(pair).upper().strip()
-        # Verify that pair is a supported standard 6-character currency/commodity symbol
+        clean_pair = _clean_pair(pair)
         if len(clean_pair) != 6:
             raise ValueError(f"Pair symbol '{clean_pair}' must be standard 6 characters (e.g. AUDUSD)")
         for i in range(len(self.tracked_pairs)):
@@ -157,8 +174,15 @@ class ForexSentimentOracle(gl.Contract):
         return True
 
     @gl.public.write
+    def transfer_ownership(self, new_owner: Address) -> bool:
+        if gl.message.sender_address != self.owner:
+            raise Exception("Only contract owner can transfer ownership")
+        self.owner = new_owner
+        return True
+
+    @gl.public.write
     def request_round(self, pair: str) -> str:
-        clean_pair = str(pair).upper().strip()
+        clean_pair = _clean_pair(pair)
         is_tracked = False
         for i in range(len(self.tracked_pairs)):
             if self.tracked_pairs[i] == clean_pair:
@@ -168,7 +192,11 @@ class ForexSentimentOracle(gl.Contract):
         if not is_tracked:
             raise ValueError(f"Pair '{clean_pair}' is not in tracked pairs")
 
-        # Retrieve on-chain historical baseline rate from previous round
+        # Determine sequential round ID for this specific pair
+        curr_pair_count = int(self.pair_round_count[clean_pair]) if clean_pair in self.pair_round_count else 0
+        target_pair_round_id = curr_pair_count + 1
+
+        # Retrieve on-chain historical baseline rate from previous round of this pair
         has_baseline = clean_pair in self.pair_latest_rate_e6
         prev_rate_e6_val = int(self.pair_latest_rate_e6[clean_pair]) if has_baseline else 0
         prev_rate_float = (prev_rate_e6_val / 1000000.0) if has_baseline else 0.0
@@ -213,7 +241,7 @@ class ForexSentimentOracle(gl.Contract):
             # Quantitative Technical Momentum calculation
             if prev_rate_float > 0.0:
                 baseline_rate = prev_rate_float
-                baseline_type = "On-Chain Stored Historical Baseline (Previous Round)"
+                baseline_type = f"On-Chain Historical Baseline (Round {curr_pair_count})"
                 round_classification = "RESOLVED"
             else:
                 baseline_rate = current_rate
@@ -224,11 +252,11 @@ class ForexSentimentOracle(gl.Contract):
             delta_bps = int(round((delta / baseline_rate) * 10000.0)) if baseline_rate > 0.0 else 0
 
             if delta_bps >= 25:
-                direction = "UPWARD_MOMENTUM (+1)"
+                direction = "UPWARD"
             elif delta_bps <= -25:
-                direction = "DOWNWARD_MOMENTUM (-1)"
+                direction = "DOWNWARD"
             else:
-                direction = "RANGE_BOUND_CONSOLIDATION (0)"
+                direction = "CONSOLIDATION"
 
             # -----------------------------------------------------------------
             # STREAM 2: Live Macroeconomic News & Central Bank RSS Feed
@@ -263,6 +291,7 @@ class ForexSentimentOracle(gl.Contract):
             return (
                 f"=== PAIR IDENTIFICATION ===\n"
                 f"Asset: {clean_pair} (Base: {base_curr}, Quote: {quote_curr})\n"
+                f"Oracle Round ID for {clean_pair}: {target_pair_round_id}\n"
                 f"Note: Sentiment signal strictly evaluates the BASE currency ({base_curr}).\n\n"
                 f"=== STREAM 1: QUANTITATIVE SPOT RATE & MOMENTUM (60% Weight) ===\n"
                 f"Verified Spot Rate: 1 {base_curr} = {current_rate:.6f} {quote_curr} [{rate_source}]\n"
@@ -285,23 +314,24 @@ class ForexSentimentOracle(gl.Contract):
                 f"Act as an algorithmic quantitative oracle validator for {clean_pair}. "
                 f"Synthesize the Dual-Stream Acquired Evidence (Stream 1 Technical Delta + Stream 2 Live Macro Headlines). "
                 f"Output a valid JSON object with the following exact keys: "
-                f"'round_id' (integer), 'pair' (string), 'rate' (string float), 'timestamp' (integer Unix timestamp of the rate), "
-                f"'baseline_rate' (string float), 'delta_bps' (integer), 'direction' (UPWARD, DOWNWARD, or CONSOLIDATION), "
-                f"'signal' ('BULLISH', 'BEARISH', or 'NEUTRAL'), 'confidence' (integer 50-100), "
-                f"'rate_quote' (verbatim quote of rate and timestamp), "
+                f"'round_id' (set to integer {target_pair_round_id}), 'pair' (string '{clean_pair}'), 'rate' (string float), "
+                f"'timestamp' (integer Unix timestamp of the rate), 'baseline_rate' (string float), 'delta_bps' (integer), "
+                f"'direction' ('UPWARD', 'DOWNWARD', or 'CONSOLIDATION'), 'signal' ('BULLISH', 'BEARISH', or 'NEUTRAL'), "
+                f"'confidence' (integer 50-100), 'rate_quote' (verbatim quote of rate and timestamp), "
                 f"'macro_quote' (verbatim quote from acquired macro headlines), "
                 f"'rationale' (concise 1-2 sentence explanation synthesizing rate momentum and acquired macro evidence), "
                 f"'status' ('RESOLVED' or 'CALIBRATED_GENESIS')."
             ),
-            criteria="""
+            criteria=f"""
                 1. Output must be valid JSON with keys: 'round_id', 'pair', 'rate', 'timestamp', 'baseline_rate', 'delta_bps', 'direction', 'signal', 'confidence', 'rate_quote', 'macro_quote', 'rationale', 'status'.
-                2. The 'signal' must be exactly one of: BULLISH, BEARISH, or NEUTRAL, applying to the BASE currency.
-                3. Grounding Rule: If delta_bps <= -25 (DOWNWARD), signal MUST NOT be BULLISH. If delta_bps >= +25 (UPWARD), signal MUST NOT be BEARISH. If -25 < delta_bps < +25, signal must reflect live macro consensus or be NEUTRAL.
-                4. The 'rate_quote' must quote the exact rate number from Stream 1.
-                5. The 'macro_quote' must be a direct verbatim excerpt from the acquired Stream 2 headlines.
-                6. The 'confidence' must be an integer between 50 and 100.
-                7. The 'timestamp' must be the exact Unix timestamp integer from Stream 1.
-                8. Contradictory, ungrounded, or fabricated claims MUST be rejected.
+                2. The 'round_id' must be the exact integer {target_pair_round_id}.
+                3. The 'signal' must be exactly one of: BULLISH, BEARISH, or NEUTRAL, applying to the BASE currency.
+                4. Grounding Rule: If delta_bps <= -25 (DOWNWARD), signal MUST NOT be BULLISH. If delta_bps >= +25 (UPWARD), signal MUST NOT be BEARISH. If -25 < delta_bps < +25, signal must reflect live macro consensus or be NEUTRAL.
+                5. The 'rate_quote' must quote the exact rate number from Stream 1.
+                6. The 'macro_quote' must be a direct verbatim excerpt from the acquired Stream 2 headlines.
+                7. The 'confidence' must be an integer between 50 and 100.
+                8. The 'timestamp' must be the exact Unix timestamp integer from Stream 1.
+                9. Contradictory, ungrounded, or fabricated claims MUST be rejected.
             """,
         )
 
@@ -322,25 +352,26 @@ class ForexSentimentOracle(gl.Contract):
 
         try:
             parsed = json.loads(clean_json_str)
-            rate_val = float(parsed.get("rate", 0.0))
+            raw_rate = str(parsed.get("rate", "0")).replace(",", "").strip()
+            rate_val = float(raw_rate)
             ts_val = int(parsed.get("timestamp", 0))
         except Exception:
             rate_val = 0.0
             ts_val = 0
 
-        new_round_id = u256(int(self.round_counter) + 1)
-        self.round_counter = new_round_id
+        # Update global network round counter
+        self.round_counter = u256(int(self.round_counter) + 1)
 
-        curr_pair_count = int(self.pair_round_count[clean_pair]) if clean_pair in self.pair_round_count else 0
-        self.pair_round_count[clean_pair] = u256(curr_pair_count + 1)
+        # Update pair-specific round state
+        self.pair_round_count[clean_pair] = u256(target_pair_round_id)
+        self.pair_latest_round_id[clean_pair] = u256(target_pair_round_id)
 
-        self.pair_latest_round_id[clean_pair] = new_round_id
         if rate_val > 0.0:
             self.pair_latest_rate_e6[clean_pair] = u256(int(round(rate_val * 1000000)))
         if ts_val > 0:
             self.pair_latest_timestamp[clean_pair] = u256(ts_val)
 
-        round_key = clean_pair + ":" + str(int(new_round_id))
+        round_key = clean_pair + ":" + str(target_pair_round_id)
         self.oracle_rounds[round_key] = clean_json_str
 
         return clean_json_str

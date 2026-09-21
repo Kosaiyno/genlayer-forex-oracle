@@ -50,6 +50,7 @@ class MockGL:
     class EqPrinciple:
         def __init__(self):
             self.wrap_in_markdown = False
+            self.use_comma_in_rate = False
 
         def prompt_non_comparative(self, get_input, task, criteria):
             prompt_input = get_input()
@@ -61,30 +62,39 @@ class MockGL:
 
             if "Asset: XAUUSD" in prompt_input:
                 pair = "XAUUSD"
-                rate = "4346.440000"
+                rate = "4,346.44" if self.use_comma_in_rate else "4346.440000"
                 timestamp = 1790014267
                 macro_quote = "Fidelity Sees Gold Climbing Toward $5,000"
             elif "Verified Spot Rate: 1 " in prompt_input:
                 rate = prompt_input.split("Verified Spot Rate: 1 ")[1].split(" = ")[1].split(" ")[0]
 
+            # Extract target pair round ID from prompt
+            round_id = 1
+            if "Oracle Round ID for " in prompt_input:
+                try:
+                    round_id_str = prompt_input.split("Oracle Round ID for ")[1].split(": ")[1].split("\n")[0]
+                    round_id = int(round_id_str)
+                except Exception:
+                    pass
+
             delta_bps = 0
-            direction = "RANGE_BOUND_CONSOLIDATION (0)"
+            direction = "CONSOLIDATION"
             signal = "NEUTRAL"
             if "Calculated Delta: " in prompt_input and "bps" in prompt_input:
                 try:
                     delta_str = prompt_input.split("Calculated Delta: ")[1].split("(")[1].split(" bps")[0]
                     delta_bps = int(delta_str)
                     if delta_bps >= 25:
-                        direction = "UPWARD_MOMENTUM (+1)"
+                        direction = "UPWARD"
                         signal = "BULLISH"
                     elif delta_bps <= -25:
-                        direction = "DOWNWARD_MOMENTUM (-1)"
+                        direction = "DOWNWARD"
                         signal = "BEARISH"
                 except Exception:
                     pass
 
             json_payload = json.dumps({
-                "round_id": 1,
+                "round_id": round_id,
                 "pair": pair,
                 "rate": rate,
                 "timestamp": timestamp,
@@ -176,6 +186,7 @@ class TestForexSentimentOracle(unittest.TestCase):
     def setUp(self):
         gl_mock.nondet.web.rate_fail = False
         gl_mock.eq_principle.wrap_in_markdown = False
+        gl_mock.eq_principle.use_comma_in_rate = False
         gl_mock.message.sender_address = Address("0x1111111111111111111111111111111111111111")
         self.oracle = ForexSentimentOracle()
 
@@ -187,31 +198,44 @@ class TestForexSentimentOracle(unittest.TestCase):
         self.assertIn("EURUSD", self.oracle.get_tracked_pairs())
         self.assertIn("XAUUSD", self.oracle.get_tracked_pairs())
 
+    def test_symbol_normalization(self):
+        # Supports slash, dash, underscore, lowercase
+        self.oracle.request_round("EUR/USD")
+        self.assertEqual(self.oracle.get_price_e6("eur-usd"), 1147723)
+        self.assertEqual(self.oracle.get_latest_signal("EUR_USD"), "NEUTRAL")
+        self.assertEqual(self.oracle.get_round_count("eur/usd"), 1)
+
     def test_decimals_getter(self):
         self.assertEqual(self.oracle.get_decimals("EURUSD"), 6)
-        self.assertEqual(self.oracle.get_decimals("XAUUSD"), 6)
+        self.assertEqual(self.oracle.get_decimals("XAU/USD"), 6)
 
-    def test_owner_access_control(self):
+    def test_owner_access_control_and_transfer(self):
         # Deployer can add pair
-        res = self.oracle.add_currency_pair("AUDUSD")
+        res = self.oracle.add_currency_pair("AUD/USD")
         self.assertTrue(res)
         self.assertIn("AUDUSD", self.oracle.get_tracked_pairs())
         
-        # Non-owner fails
+        # Non-owner fails to add pair
         gl_mock.message.sender_address = Address("0x9999999999999999999999999999999999999999")
         with self.assertRaises(Exception) as ctx:
             self.oracle.add_currency_pair("NZDUSD")
         self.assertIn("Only contract owner", str(ctx.exception))
 
-    def test_fiat_pair_round_eurusd(self):
-        result = self.oracle.request_round("EURUSD")
-        self.assertIn("EURUSD", result)
-        self.assertIn("1.147723", result)
-        self.assertIn("macro_quote", result)
-        self.assertEqual(self.oracle.round_counter, 1)
-        self.assertEqual(self.oracle.get_price_e6("EURUSD"), 1147723)
-        self.assertEqual(self.oracle.get_latest_timestamp("EURUSD"), 1789948951)
-        self.assertEqual(self.oracle.get_latest_signal("EURUSD"), "NEUTRAL")
+        # Non-owner fails to transfer ownership
+        with self.assertRaises(Exception) as ctx:
+            self.oracle.transfer_ownership(Address("0x9999999999999999999999999999999999999999"))
+        self.assertIn("Only contract owner", str(ctx.exception))
+
+        # Real owner transfers ownership to new owner
+        gl_mock.message.sender_address = Address("0x1111111111111111111111111111111111111111")
+        self.oracle.transfer_ownership(Address("0x2222222222222222222222222222222222222222"))
+        self.assertIn("Owner: 0x2222222222222222222222222222222222222222", self.oracle.get_oracle_stats())
+
+        # New owner can now add pair
+        gl_mock.message.sender_address = Address("0x2222222222222222222222222222222222222222")
+        res2 = self.oracle.add_currency_pair("NZDUSD")
+        self.assertTrue(res2)
+        self.assertIn("NZDUSD", self.oracle.get_tracked_pairs())
 
     def test_commodity_gold_round_xauusd(self):
         result = self.oracle.request_round("XAUUSD")
@@ -223,10 +247,14 @@ class TestForexSentimentOracle(unittest.TestCase):
         self.assertEqual(self.oracle.get_latest_timestamp("XAUUSD"), 1790014267)
         self.assertEqual(self.oracle.get_latest_signal("XAUUSD"), "NEUTRAL")
 
+    def test_comma_separated_rate_parsing(self):
+        gl_mock.eq_principle.use_comma_in_rate = True
+        result = self.oracle.request_round("XAUUSD")
+        self.assertEqual(self.oracle.get_price_e6("XAUUSD"), 4346440000)
+
     def test_markdown_fence_sanitization(self):
         gl_mock.eq_principle.wrap_in_markdown = True
         result = self.oracle.request_round("EURUSD")
-        # Ensure fences are stripped and returned string is pure valid JSON
         self.assertFalse(result.startswith("```"))
         parsed = json.loads(result)
         self.assertEqual(parsed["pair"], "EURUSD")
@@ -235,18 +263,40 @@ class TestForexSentimentOracle(unittest.TestCase):
     def test_stale_round_detection(self):
         self.oracle.request_round("EURUSD")
         # Timestamp is 1789948951, block timestamp is 1790015000 (diff: 66049 seconds)
-        self.assertTrue(self.oracle.is_round_stale("EURUSD", 3600))   # Stale if max age is 1 hour
-        self.assertFalse(self.oracle.is_round_stale("EURUSD", 86400)) # Not stale if max age is 24 hours
+        self.assertTrue(self.oracle.is_round_stale("EURUSD", 3600))
+        self.assertFalse(self.oracle.is_round_stale("EURUSD", 86400))
+        # Explicit timestamp freshness checker
+        self.assertTrue(self.oracle.is_round_stale_at("EURUSD", 1790015000, 3600))
+        self.assertFalse(self.oracle.is_round_stale_at("EURUSD", 1790015000, 86400))
 
-    def test_multi_round_historical_archive(self):
+    def test_interleaved_multi_asset_round_sequencing(self):
+        # Round 1: EURUSD
         self.oracle.request_round("EURUSD")
+        # Round 2: XAUUSD
+        self.oracle.request_round("XAUUSD")
+        # Round 3: EURUSD
         self.oracle.request_round("EURUSD")
-        self.assertEqual(self.oracle.round_counter, 2)
+
+        # Global counter should be 3
+        self.assertEqual(self.oracle.round_counter, 3)
+
+        # Pair round counts should be independent
         self.assertEqual(self.oracle.get_round_count("EURUSD"), 2)
-        r1 = self.oracle.get_round_by_id("EURUSD", 1)
-        r2 = self.oracle.get_round_by_id("EURUSD", 2)
-        self.assertIn("RESOLVED", r1)
-        self.assertIn("RESOLVED", r2)
+        self.assertEqual(self.oracle.get_round_count("XAUUSD"), 1)
+
+        # EURUSD rounds 1 and 2 are both accessible
+        eur_r1 = json.loads(self.oracle.get_round_by_id("EURUSD", 1))
+        eur_r2 = json.loads(self.oracle.get_round_by_id("EURUSD", 2))
+        self.assertEqual(eur_r1["round_id"], 1)
+        self.assertEqual(eur_r2["round_id"], 2)
+
+        # XAUUSD round 1 is accessible
+        xau_r1 = json.loads(self.oracle.get_round_by_id("XAUUSD", 1))
+        self.assertEqual(xau_r1["round_id"], 1)
+
+        # Verify get_latest_round matches round 2 for EURUSD
+        latest_eur = json.loads(self.oracle.get_latest_round("EURUSD"))
+        self.assertEqual(latest_eur["round_id"], 2)
 
     def test_fails_safely_when_web_fails(self):
         gl_mock.nondet.web.rate_fail = True
