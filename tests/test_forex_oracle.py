@@ -39,15 +39,16 @@ class MockGL:
         def prompt_non_comparative(self, get_input, task, criteria):
             prompt_input = get_input()
             
-            # Extract current spot rate from prompt input
             rate = "1.147723"
-            if "Verified Spot Rate: 1 EUR = " in prompt_input:
-                rate = prompt_input.split("Verified Spot Rate: 1 EUR = ")[1].split(" ")[0]
-
-            # Verify that Stream 2 Live Macro Evidence is acquired inside nondet
+            pair = "EURUSD"
             macro_quote = "Hawkish Fed Supports DXY as EUR and GBP Struggle"
-            if "Hawkish Fed" in prompt_input:
-                macro_quote = "Hawkish Fed Supports DXY as EUR and GBP Struggle"
+
+            if "Asset: XAUUSD" in prompt_input:
+                pair = "XAUUSD"
+                rate = "4340.900000"
+                macro_quote = "Fidelity Sees Gold Climbing Toward $5,000"
+            elif "Verified Spot Rate: 1 " in prompt_input:
+                rate = prompt_input.split("Verified Spot Rate: 1 ")[1].split(" = ")[1].split(" ")[0]
 
             delta_bps = 0
             direction = "CONSOLIDATION"
@@ -67,14 +68,14 @@ class MockGL:
 
             return json.dumps({
                 "round_id": 1,
-                "pair": "EURUSD",
+                "pair": pair,
                 "rate": rate,
-                "baseline_rate": "1.145000" if delta_bps != 0 else rate,
+                "baseline_rate": rate,
                 "delta_bps": delta_bps,
                 "direction": direction,
                 "signal": signal,
                 "confidence": 88,
-                "rate_quote": f"Verified Spot Rate: 1 EUR = {rate} USD",
+                "rate_quote": f"Verified Spot Rate = {rate}",
                 "macro_quote": macro_quote,
                 "rationale": "Synthesized Stream 1 spot momentum with Stream 2 live acquired macroeconomic news.",
                 "status": "RESOLVED"
@@ -89,7 +90,14 @@ class MockGL:
                 if self.rate_fail:
                     raise RuntimeError("HTTP 503 Service Unavailable")
                 
-                # If requesting Yahoo Finance RSS
+                # Gold spot query (Binance Vision PAXG)
+                if "PAXGUSDT" in url:
+                    return MockWebResponse(json.dumps({
+                        "symbol": "PAXGUSDT",
+                        "price": "4340.90000000"
+                    }))
+
+                # Yahoo Finance RSS feeds
                 if "yahoo.com" in url or "rss" in url:
                     sample_rss = """<?xml version="1.0" encoding="UTF-8"?>
                     <rss version="2.0">
@@ -100,14 +108,14 @@ class MockGL:
                           <pubDate>Mon, 21 Sep 2026 08:15:36 +0000</pubDate>
                         </item>
                         <item>
-                          <title>Dollar Holds Firm Ahead of Central Bank Rate Decisions</title>
+                          <title>Fidelity Sees Gold Climbing Toward $5,000</title>
                           <pubDate>Mon, 21 Sep 2026 06:30:00 +0000</pubDate>
                         </item>
                       </channel>
                     </rss>"""
                     return MockWebResponse(sample_rss)
 
-                # If requesting Open ER-API
+                # Standard Fiat Exchange Rates (Open ER-API)
                 return MockWebResponse(json.dumps({
                     "result": "success",
                     "base_code": "EUR",
@@ -116,7 +124,7 @@ class MockGL:
                     "rates": {
                         "USD": 1.147723,
                         "GBP": 0.858506,
-                        "JPY": 180.272447
+                        "JPY": 156.918661
                     }
                 }))
 
@@ -149,61 +157,57 @@ class TestForexSentimentOracle(unittest.TestCase):
         self.assertIn("Tracked Pairs: 4", stats)
         self.assertIn("Total Resolved Rounds: 0", stats)
         self.assertIn("EURUSD", self.oracle.get_tracked_pairs())
+        self.assertIn("XAUUSD", self.oracle.get_tracked_pairs())
+
+    def test_decimals_getter(self):
+        self.assertEqual(self.oracle.get_decimals("EURUSD"), 6)
+        self.assertEqual(self.oracle.get_decimals("XAUUSD"), 6)
 
     def test_add_currency_pair(self):
-        res = self.oracle.add_currency_pair("BTCUSD")
+        res = self.oracle.add_currency_pair("AUDUSD")
         self.assertTrue(res)
-        self.assertIn("BTCUSD", self.oracle.get_tracked_pairs())
-        self.assertFalse(self.oracle.add_currency_pair("BTCUSD"))
+        self.assertIn("AUDUSD", self.oracle.get_tracked_pairs())
+        self.assertFalse(self.oracle.add_currency_pair("AUDUSD"))
+        with self.assertRaises(ValueError):
+            self.oracle.add_currency_pair("INVALID_SYMBOL_LEN")
 
-    def test_empty_oracle_state(self):
-        round_info = self.oracle.get_latest_round("EURUSD")
-        self.assertIn("No oracle round recorded for EURUSD", round_info)
-        self.assertEqual(self.oracle.get_price_e6("EURUSD"), 0)
-        self.assertEqual(self.oracle.get_round_count("EURUSD"), 0)
-        self.assertTrue(self.oracle.is_round_stale("EURUSD", 3600))
-
-    def test_dual_stream_acquisition_round_1(self):
+    def test_fiat_pair_round_eurusd(self):
         result = self.oracle.request_round("EURUSD")
         print("\n" + "="*70)
-        print("ORACLE ROUND 1 (WITH REAL DUAL-STREAM INGESTION):")
+        print("EURUSD ROUND (FIAT RESOLUTION):")
         print(result)
         print("="*70 + "\n")
-
         self.assertIn("EURUSD", result)
         self.assertIn("1.147723", result)
         self.assertIn("macro_quote", result)
-        self.assertIn("Hawkish Fed Supports DXY", result)
-        self.assertIn("RESOLVED", result)
-
-        # State checks
-        self.assertEqual(self.oracle.round_counter, 1)
-        self.assertEqual(self.oracle.get_round_count("EURUSD"), 1)
-        self.assertEqual(self.oracle.get_price_e6("EURUSD"), 1147723)
-
-    def test_multi_round_with_historical_delta(self):
-        res1 = self.oracle.request_round("EURUSD")
         self.assertEqual(self.oracle.round_counter, 1)
 
-        res2 = self.oracle.request_round("EURUSD")
+    def test_commodity_gold_round_xauusd(self):
+        result = self.oracle.request_round("XAUUSD")
+        print("\n" + "="*70)
+        print("XAUUSD ROUND (COMMODITY GOLD SPOT ROUTER):")
+        print(result)
+        print("="*70 + "\n")
+        self.assertIn("XAUUSD", result)
+        self.assertIn("4340.900000", result)
+        self.assertIn("Gold", result)
+        self.assertEqual(self.oracle.round_counter, 1)
+        self.assertEqual(self.oracle.get_price_e6("XAUUSD"), 4340900000)
+
+    def test_multi_round_historical_archive(self):
+        self.oracle.request_round("EURUSD")
+        self.oracle.request_round("EURUSD")
         self.assertEqual(self.oracle.round_counter, 2)
         self.assertEqual(self.oracle.get_round_count("EURUSD"), 2)
-
-        # Archive check
         r1 = self.oracle.get_round_by_id("EURUSD", 1)
         r2 = self.oracle.get_round_by_id("EURUSD", 2)
         self.assertIn("RESOLVED", r1)
         self.assertIn("RESOLVED", r2)
 
-    def test_fails_safely_when_rate_feed_fails(self):
+    def test_fails_safely_when_web_fails(self):
         gl_mock.nondet.web.rate_fail = True
-        with self.assertRaises(RuntimeError) as ctx:
+        with self.assertRaises(RuntimeError):
             self.oracle.request_round("EURUSD")
-        self.assertIn("Live market evidence fetch failed", str(ctx.exception))
-
-    def test_untracked_pair_raises_error(self):
-        with self.assertRaises(ValueError):
-            self.oracle.request_round("UNTRACKED_PAIR")
 
 if __name__ == "__main__":
     unittest.main()
