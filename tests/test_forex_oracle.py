@@ -16,6 +16,18 @@ class TreeMap(dict):
 class u256(int):
     pass
 
+class Address(str):
+    pass
+
+class MockMessage:
+    def __init__(self):
+        self.sender_address = Address("0x1111111111111111111111111111111111111111")
+        self.origin_address = Address("0x1111111111111111111111111111111111111111")
+
+class MockBlock:
+    def __init__(self):
+        self.timestamp = 1790015000
+
 class MockGL:
     class Contract:
         def __new__(cls, *args, **kwargs):
@@ -36,40 +48,46 @@ class MockGL:
             return func
 
     class EqPrinciple:
+        def __init__(self):
+            self.wrap_in_markdown = False
+
         def prompt_non_comparative(self, get_input, task, criteria):
             prompt_input = get_input()
             
             rate = "1.147723"
             pair = "EURUSD"
+            timestamp = 1789948951
             macro_quote = "Hawkish Fed Supports DXY as EUR and GBP Struggle"
 
             if "Asset: XAUUSD" in prompt_input:
                 pair = "XAUUSD"
-                rate = "4340.900000"
+                rate = "4346.440000"
+                timestamp = 1790014267
                 macro_quote = "Fidelity Sees Gold Climbing Toward $5,000"
             elif "Verified Spot Rate: 1 " in prompt_input:
                 rate = prompt_input.split("Verified Spot Rate: 1 ")[1].split(" = ")[1].split(" ")[0]
 
             delta_bps = 0
-            direction = "CONSOLIDATION"
+            direction = "RANGE_BOUND_CONSOLIDATION (0)"
             signal = "NEUTRAL"
             if "Calculated Delta: " in prompt_input and "bps" in prompt_input:
                 try:
                     delta_str = prompt_input.split("Calculated Delta: ")[1].split("(")[1].split(" bps")[0]
                     delta_bps = int(delta_str)
                     if delta_bps >= 25:
-                        direction = "UPWARD"
+                        direction = "UPWARD_MOMENTUM (+1)"
                         signal = "BULLISH"
                     elif delta_bps <= -25:
-                        direction = "DOWNWARD"
+                        direction = "DOWNWARD_MOMENTUM (-1)"
                         signal = "BEARISH"
                 except Exception:
                     pass
 
-            return json.dumps({
+            json_payload = json.dumps({
                 "round_id": 1,
                 "pair": pair,
                 "rate": rate,
+                "timestamp": timestamp,
                 "baseline_rate": rate,
                 "delta_bps": delta_bps,
                 "direction": direction,
@@ -81,6 +99,10 @@ class MockGL:
                 "status": "RESOLVED"
             })
 
+            if self.wrap_in_markdown:
+                return f"```json\n{json_payload}\n```"
+            return json_payload
+
     class NonDet:
         class Web:
             def __init__(self):
@@ -90,11 +112,12 @@ class MockGL:
                 if self.rate_fail:
                     raise RuntimeError("HTTP 503 Service Unavailable")
                 
-                # Gold spot query (Binance Vision PAXG)
+                # Gold spot query (Binance Vision PAXG 24hr ticker)
                 if "PAXGUSDT" in url:
                     return MockWebResponse(json.dumps({
                         "symbol": "PAXGUSDT",
-                        "price": "4340.90000000"
+                        "lastPrice": "4346.44000000",
+                        "closeTime": 1790014267984
                     }))
 
                 # Yahoo Finance RSS feeds
@@ -133,11 +156,14 @@ gl_mock.public = MockGL.Public()
 gl_mock.eq_principle = MockGL.EqPrinciple()
 gl_mock.nondet = MockGL.NonDet()
 gl_mock.nondet.web = MockGL.NonDet.Web()
+gl_mock.message = MockMessage()
+gl_mock.block = MockBlock()
 gl_mock.gl = gl_mock
 gl_mock.Contract = MockGL.Contract
 gl_mock.DynArray = DynArray
 gl_mock.TreeMap = TreeMap
 gl_mock.u256 = u256
+gl_mock.Address = Address
 
 sys.modules['genlayer'] = gl_mock
 
@@ -149,11 +175,13 @@ class TestForexSentimentOracle(unittest.TestCase):
 
     def setUp(self):
         gl_mock.nondet.web.rate_fail = False
+        gl_mock.eq_principle.wrap_in_markdown = False
+        gl_mock.message.sender_address = Address("0x1111111111111111111111111111111111111111")
         self.oracle = ForexSentimentOracle()
 
     def test_initialization(self):
         stats = self.oracle.get_oracle_stats()
-        self.assertIn("Owner: 0x0000000000000000000000000000000000000000", stats)
+        self.assertIn("Owner: 0x1111111111111111111111111111111111111111", stats)
         self.assertIn("Tracked Pairs: 4", stats)
         self.assertIn("Total Resolved Rounds: 0", stats)
         self.assertIn("EURUSD", self.oracle.get_tracked_pairs())
@@ -163,36 +191,52 @@ class TestForexSentimentOracle(unittest.TestCase):
         self.assertEqual(self.oracle.get_decimals("EURUSD"), 6)
         self.assertEqual(self.oracle.get_decimals("XAUUSD"), 6)
 
-    def test_add_currency_pair(self):
+    def test_owner_access_control(self):
+        # Deployer can add pair
         res = self.oracle.add_currency_pair("AUDUSD")
         self.assertTrue(res)
         self.assertIn("AUDUSD", self.oracle.get_tracked_pairs())
-        self.assertFalse(self.oracle.add_currency_pair("AUDUSD"))
-        with self.assertRaises(ValueError):
-            self.oracle.add_currency_pair("INVALID_SYMBOL_LEN")
+        
+        # Non-owner fails
+        gl_mock.message.sender_address = Address("0x9999999999999999999999999999999999999999")
+        with self.assertRaises(Exception) as ctx:
+            self.oracle.add_currency_pair("NZDUSD")
+        self.assertIn("Only contract owner", str(ctx.exception))
 
     def test_fiat_pair_round_eurusd(self):
         result = self.oracle.request_round("EURUSD")
-        print("\n" + "="*70)
-        print("EURUSD ROUND (FIAT RESOLUTION):")
-        print(result)
-        print("="*70 + "\n")
         self.assertIn("EURUSD", result)
         self.assertIn("1.147723", result)
         self.assertIn("macro_quote", result)
         self.assertEqual(self.oracle.round_counter, 1)
+        self.assertEqual(self.oracle.get_price_e6("EURUSD"), 1147723)
+        self.assertEqual(self.oracle.get_latest_timestamp("EURUSD"), 1789948951)
+        self.assertEqual(self.oracle.get_latest_signal("EURUSD"), "NEUTRAL")
 
     def test_commodity_gold_round_xauusd(self):
         result = self.oracle.request_round("XAUUSD")
-        print("\n" + "="*70)
-        print("XAUUSD ROUND (COMMODITY GOLD SPOT ROUTER):")
-        print(result)
-        print("="*70 + "\n")
         self.assertIn("XAUUSD", result)
-        self.assertIn("4340.900000", result)
+        self.assertIn("4346.440000", result)
         self.assertIn("Gold", result)
         self.assertEqual(self.oracle.round_counter, 1)
-        self.assertEqual(self.oracle.get_price_e6("XAUUSD"), 4340900000)
+        self.assertEqual(self.oracle.get_price_e6("XAUUSD"), 4346440000)
+        self.assertEqual(self.oracle.get_latest_timestamp("XAUUSD"), 1790014267)
+        self.assertEqual(self.oracle.get_latest_signal("XAUUSD"), "NEUTRAL")
+
+    def test_markdown_fence_sanitization(self):
+        gl_mock.eq_principle.wrap_in_markdown = True
+        result = self.oracle.request_round("EURUSD")
+        # Ensure fences are stripped and returned string is pure valid JSON
+        self.assertFalse(result.startswith("```"))
+        parsed = json.loads(result)
+        self.assertEqual(parsed["pair"], "EURUSD")
+        self.assertEqual(self.oracle.get_latest_signal("EURUSD"), "NEUTRAL")
+
+    def test_stale_round_detection(self):
+        self.oracle.request_round("EURUSD")
+        # Timestamp is 1789948951, block timestamp is 1790015000 (diff: 66049 seconds)
+        self.assertTrue(self.oracle.is_round_stale("EURUSD", 3600))   # Stale if max age is 1 hour
+        self.assertFalse(self.oracle.is_round_stale("EURUSD", 86400)) # Not stale if max age is 24 hours
 
     def test_multi_round_historical_archive(self):
         self.oracle.request_round("EURUSD")

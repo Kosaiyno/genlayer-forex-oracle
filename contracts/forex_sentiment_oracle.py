@@ -12,9 +12,10 @@ class ForexSentimentOracle(gl.Contract):
 
     Hardened Enterprise Architecture:
     1. Multi-Asset Nondeterministic Routing:
-       - Fiat Pairs (EURUSD, GBPUSD, USDJPY): Routed to Open ER-API.
-       - Commodity Gold (XAUUSD): Routed to LBMA-backed physical gold spot feed.
-       - Zero Truncation & Zero Static Mocking.
+       - Fiat Pairs (EURUSD, GBPUSD, USDJPY): Routed to Open ER-API with live Unix timestamps.
+       - Commodity Gold (XAUUSD): Routed to LBMA-backed physical gold spot ticker (PAXG/USDT)
+         via Binance Vision with real-time 24hr spot close timestamp.
+       - Zero Truncation & Zero Hard-Coded Fallbacks.
     2. Live Macroeconomic Headline Stream:
        - Fetches real-time financial market & central bank RSS headlines via Yahoo Finance
          (EURUSD=X, GBPUSD=X, JPY=X, GC=F).
@@ -25,10 +26,15 @@ class ForexSentimentOracle(gl.Contract):
     4. DeFi-Ready Consumer Interface:
        - get_price_e6(pair) -> integer price scaled to 6 decimals.
        - get_decimals(pair) -> returns u256(6) for standardized DeFi integration.
+       - get_latest_signal(pair) -> immediate 'BULLISH', 'BEARISH', or 'NEUTRAL' string.
+       - get_latest_timestamp(pair) -> on-chain stored Unix timestamp of latest round.
+       - is_round_stale(pair, max_age_seconds) -> protocol liquidation / safety freshness check.
        - get_latest_round(pair), get_round_by_id(pair, id), get_round_count(pair).
-       - is_round_stale(pair, max_age_seconds) for protocol liquidation / safety checks.
+    5. Access Control:
+       - Contract owner initialized to deployer (gl.message.sender_address).
+       - Only owner can register new currency or commodity pairs.
     """
-    owner: str
+    owner: Address
     tracked_pairs: DynArray[str]
     round_counter: u256
     pair_round_count: TreeMap[str, u256]
@@ -38,7 +44,7 @@ class ForexSentimentOracle(gl.Contract):
     oracle_rounds: TreeMap[str, str]
 
     def __init__(self):
-        self.owner = "0x0000000000000000000000000000000000000000"
+        self.owner = gl.message.sender_address
         self.tracked_pairs.append("EURUSD")
         self.tracked_pairs.append("GBPUSD")
         self.tracked_pairs.append("USDJPY")
@@ -66,6 +72,35 @@ class ForexSentimentOracle(gl.Contract):
         return u256(6)
 
     @gl.public.view
+    def get_price_e6(self, pair: str) -> u256:
+        clean_pair = str(pair).upper().strip()
+        if clean_pair in self.pair_latest_rate_e6:
+            return self.pair_latest_rate_e6[clean_pair]
+        return u256(0)
+
+    @gl.public.view
+    def get_latest_timestamp(self, pair: str) -> u256:
+        clean_pair = str(pair).upper().strip()
+        if clean_pair in self.pair_latest_timestamp:
+            return self.pair_latest_timestamp[clean_pair]
+        return u256(0)
+
+    @gl.public.view
+    def get_latest_signal(self, pair: str) -> str:
+        clean_pair = str(pair).upper().strip()
+        if clean_pair not in self.pair_latest_round_id:
+            return "NONE"
+        latest_id = str(self.pair_latest_round_id[clean_pair])
+        round_key = clean_pair + ":" + latest_id
+        if round_key not in self.oracle_rounds:
+            return "NONE"
+        try:
+            data = json.loads(self.oracle_rounds[round_key])
+            return str(data.get("signal", "NONE"))
+        except Exception:
+            return "NONE"
+
+    @gl.public.view
     def get_latest_round(self, pair: str) -> str:
         clean_pair = str(pair).upper().strip()
         if clean_pair not in self.pair_latest_round_id:
@@ -85,13 +120,6 @@ class ForexSentimentOracle(gl.Contract):
         return "Round not found: " + round_key
 
     @gl.public.view
-    def get_price_e6(self, pair: str) -> u256:
-        clean_pair = str(pair).upper().strip()
-        if clean_pair in self.pair_latest_rate_e6:
-            return self.pair_latest_rate_e6[clean_pair]
-        return u256(0)
-
-    @gl.public.view
     def get_round_count(self, pair: str) -> u256:
         clean_pair = str(pair).upper().strip()
         if clean_pair in self.pair_round_count:
@@ -106,10 +134,18 @@ class ForexSentimentOracle(gl.Contract):
         last_ts = int(self.pair_latest_timestamp[clean_pair])
         if last_ts == 0:
             return True
+        try:
+            now_ts = int(gl.block.timestamp)
+            if now_ts > last_ts:
+                return (now_ts - last_ts) > max_age_seconds
+        except Exception:
+            pass
         return False
 
     @gl.public.write
     def add_currency_pair(self, pair: str) -> bool:
+        if gl.message.sender_address != self.owner:
+            raise Exception("Only contract owner can add tracked currency pairs")
         clean_pair = str(pair).upper().strip()
         # Verify that pair is a supported standard 6-character currency/commodity symbol
         if len(clean_pair) != 6:
@@ -145,18 +181,17 @@ class ForexSentimentOracle(gl.Contract):
             # STREAM 1: Nondeterministic Spot Rate & Delta Ingestion
             # -----------------------------------------------------------------
             if clean_pair == "XAUUSD":
-                # Robust Commodity Gold Router: Uses 1:1 LBMA Physical Gold Spot Feed
-                gold_url = "https://data-api.binance.vision/api/v3/ticker/price?symbol=PAXGUSDT"
+                # Robust Commodity Gold Router: Uses 1:1 LBMA Physical Gold Spot Feed via Binance Vision 24hr Ticker
+                gold_url = "https://data-api.binance.vision/api/v3/ticker/24hr?symbol=PAXGUSDT"
                 try:
                     resp = gl.nondet.web.get(gold_url)
                     body_text = resp.body.decode("utf-8") if hasattr(resp, "body") else str(resp)
                     data = json.loads(body_text)
-                    current_rate = float(data["price"])
+                    current_rate = float(data["lastPrice"])
                     rate_source = "LBMA Gold Spot Benchmark (PAXG/USDT)"
-                    rate_time_utc = "Real-Time Exchange Spot"
-                    rate_time_unix = 1789948951
+                    rate_time_unix = int(data.get("closeTime", 0)) // 1000
+                    rate_time_utc = f"Exchange 24hr Spot Close (Unix: {rate_time_unix})"
                 except Exception as e:
-                    # Fallback to secondary physical gold benchmark if needed
                     raise RuntimeError(f"Live gold spot evidence fetch failed for {clean_pair}: {str(e)}")
             else:
                 # Standard Fiat Currency Router (EUR, GBP, USD, JPY)
@@ -190,13 +225,10 @@ class ForexSentimentOracle(gl.Contract):
 
             if delta_bps >= 25:
                 direction = "UPWARD_MOMENTUM (+1)"
-                tech_score = 1.0
             elif delta_bps <= -25:
                 direction = "DOWNWARD_MOMENTUM (-1)"
-                tech_score = -1.0
             else:
                 direction = "RANGE_BOUND_CONSOLIDATION (0)"
-                tech_score = 0.0
 
             # -----------------------------------------------------------------
             # STREAM 2: Live Macroeconomic News & Central Bank RSS Feed
@@ -242,7 +274,7 @@ class ForexSentimentOracle(gl.Contract):
                 f"Acquired Live Macro Headlines:\n{macro_block}\n\n"
                 f"=== VALIDATOR CRITERIA & SYNTHESIS RULES ===\n"
                 f"1. Synthesize quantitative momentum delta_bps (60% weight) with live acquired macro headlines (40% weight).\n"
-                f"2. Output valid JSON containing exact rate, delta_bps, direction, signal, confidence, verbatim rate quote, verbatim macro quote, and rationale.\n"
+                f"2. Output valid JSON containing exact rate, timestamp, delta_bps, direction, signal, confidence, verbatim rate quote, verbatim macro quote, and rationale.\n"
                 f"3. Strict Anti-Contradiction: If delta_bps <= -25 (DOWNWARD), signal MUST NOT be BULLISH. If delta_bps >= +25 (UPWARD), signal MUST NOT be BEARISH.\n"
                 f"4. The macro_quote MUST be an exact excerpt from the Acquired Live Macro Headlines listed above."
             )
@@ -253,8 +285,8 @@ class ForexSentimentOracle(gl.Contract):
                 f"Act as an algorithmic quantitative oracle validator for {clean_pair}. "
                 f"Synthesize the Dual-Stream Acquired Evidence (Stream 1 Technical Delta + Stream 2 Live Macro Headlines). "
                 f"Output a valid JSON object with the following exact keys: "
-                f"'round_id' (integer), 'pair' (string), 'rate' (string float), 'baseline_rate' (string float), "
-                f"'delta_bps' (integer), 'direction' (UPWARD, DOWNWARD, or CONSOLIDATION), "
+                f"'round_id' (integer), 'pair' (string), 'rate' (string float), 'timestamp' (integer Unix timestamp of the rate), "
+                f"'baseline_rate' (string float), 'delta_bps' (integer), 'direction' (UPWARD, DOWNWARD, or CONSOLIDATION), "
                 f"'signal' ('BULLISH', 'BEARISH', or 'NEUTRAL'), 'confidence' (integer 50-100), "
                 f"'rate_quote' (verbatim quote of rate and timestamp), "
                 f"'macro_quote' (verbatim quote from acquired macro headlines), "
@@ -262,23 +294,39 @@ class ForexSentimentOracle(gl.Contract):
                 f"'status' ('RESOLVED' or 'CALIBRATED_GENESIS')."
             ),
             criteria="""
-                1. Output must be valid JSON with keys: 'round_id', 'pair', 'rate', 'baseline_rate', 'delta_bps', 'direction', 'signal', 'confidence', 'rate_quote', 'macro_quote', 'rationale', 'status'.
+                1. Output must be valid JSON with keys: 'round_id', 'pair', 'rate', 'timestamp', 'baseline_rate', 'delta_bps', 'direction', 'signal', 'confidence', 'rate_quote', 'macro_quote', 'rationale', 'status'.
                 2. The 'signal' must be exactly one of: BULLISH, BEARISH, or NEUTRAL, applying to the BASE currency.
                 3. Grounding Rule: If delta_bps <= -25 (DOWNWARD), signal MUST NOT be BULLISH. If delta_bps >= +25 (UPWARD), signal MUST NOT be BEARISH. If -25 < delta_bps < +25, signal must reflect live macro consensus or be NEUTRAL.
                 4. The 'rate_quote' must quote the exact rate number from Stream 1.
                 5. The 'macro_quote' must be a direct verbatim excerpt from the acquired Stream 2 headlines.
                 6. The 'confidence' must be an integer between 50 and 100.
-                7. Contradictory, ungrounded, or fabricated claims MUST be rejected.
+                7. The 'timestamp' must be the exact Unix timestamp integer from Stream 1.
+                8. Contradictory, ungrounded, or fabricated claims MUST be rejected.
             """,
         )
 
-        result_str = str(raw_result)
+        result_str = str(raw_result).strip()
+
+        # Sanitize LLM response: strip markdown code blocks or surrounding text if present
+        clean_json_str = result_str
+        if "```" in clean_json_str:
+            first_brace = clean_json_str.find("{")
+            last_brace = clean_json_str.rfind("}")
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                clean_json_str = clean_json_str[first_brace : last_brace + 1]
+        elif not clean_json_str.startswith("{"):
+            first_brace = clean_json_str.find("{")
+            last_brace = clean_json_str.rfind("}")
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                clean_json_str = clean_json_str[first_brace : last_brace + 1]
 
         try:
-            parsed = json.loads(result_str)
+            parsed = json.loads(clean_json_str)
             rate_val = float(parsed.get("rate", 0.0))
+            ts_val = int(parsed.get("timestamp", 0))
         except Exception:
             rate_val = 0.0
+            ts_val = 0
 
         new_round_id = u256(int(self.round_counter) + 1)
         self.round_counter = new_round_id
@@ -289,11 +337,13 @@ class ForexSentimentOracle(gl.Contract):
         self.pair_latest_round_id[clean_pair] = new_round_id
         if rate_val > 0.0:
             self.pair_latest_rate_e6[clean_pair] = u256(int(round(rate_val * 1000000)))
+        if ts_val > 0:
+            self.pair_latest_timestamp[clean_pair] = u256(ts_val)
 
         round_key = clean_pair + ":" + str(int(new_round_id))
-        self.oracle_rounds[round_key] = result_str
+        self.oracle_rounds[round_key] = clean_json_str
 
-        return result_str
+        return clean_json_str
 
     @gl.public.write
     def request_oracle_update(self, pair: str) -> str:
