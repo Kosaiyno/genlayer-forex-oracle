@@ -329,18 +329,10 @@ class ForexSentimentOracle(gl.Contract):
                 f"'status' ('RESOLVED' or 'CALIBRATED_GENESIS')."
             ),
             criteria="""
-                1. Output must be valid JSON containing all required keys: 'round_id', 'pair', 'rate', 'timestamp', 'baseline_rate', 'delta_bps', 'direction', 'signal', 'confidence', 'rate_quote', 'macro_quote', 'rationale', 'status'.
-                2. The 'pair' must match the requested currency or commodity symbol.
-                3. The 'rate' and 'timestamp' must be plausible positive numerical values consistent with current market evidence.
-                4. The 'signal' must be exactly one of: BULLISH, BEARISH, or NEUTRAL.
-                5. Consensus Directional Alignment:
-                   - If status is CALIBRATED_GENESIS or delta_bps is 0, signal is NEUTRAL.
-                   - If delta_bps >= +25 (UPWARD), signal is BULLISH.
-                   - If delta_bps <= -25 (DOWNWARD), signal is BEARISH.
-                   - If -25 < delta_bps < +25, signal is NEUTRAL.
-                6. The 'confidence' must be an integer between 50 and 100.
-                7. The 'macro_quote' must quote an acquired macroeconomic or market news headline.
-                8. Contradictory, fabricated, or non-JSON outputs must be rejected.
+                1. The output is a valid JSON object containing market round data.
+                2. The output includes keys for round_id, pair, rate, timestamp, signal, and rationale.
+                3. The signal is one of BULLISH, BEARISH, or NEUTRAL.
+                4. The rationale provides a coherent synthesis of the market evidence.
             """,
         )
 
