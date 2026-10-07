@@ -26,6 +26,7 @@ class ForexSentimentOracle(gl.Contract):
     3. Quantitative Grounding & Equivalence Principle:
        - Basis point delta (delta_bps) against on-chain stored previous round baseline.
        - Composite weighting: Technical Momentum (60%) + Live Macro Sentiment (40%).
+       - Unambiguous Genesis Calibration: CALIBRATED_GENESIS rounds with 0 delta_bps are strictly NEUTRAL.
        - Strict Anti-Contradiction: Negative momentum CANNOT be BULLISH; positive CANNOT be BEARISH.
     4. DeFi-Ready Consumer Interface:
        - get_price_e6(pair) -> integer price scaled to 6 decimals.
@@ -292,6 +293,7 @@ class ForexSentimentOracle(gl.Contract):
                 f"=== PAIR IDENTIFICATION ===\n"
                 f"Asset: {clean_pair} (Base: {base_curr}, Quote: {quote_curr})\n"
                 f"Oracle Round ID for {clean_pair}: {target_pair_round_id}\n"
+                f"Status: {round_classification}\n"
                 f"Note: Sentiment signal strictly evaluates the BASE currency ({base_curr}).\n\n"
                 f"=== STREAM 1: QUANTITATIVE SPOT RATE & MOMENTUM (60% Weight) ===\n"
                 f"Verified Spot Rate: 1 {base_curr} = {current_rate:.6f} {quote_curr} [{rate_source}]\n"
@@ -304,7 +306,11 @@ class ForexSentimentOracle(gl.Contract):
                 f"=== VALIDATOR CRITERIA & SYNTHESIS RULES ===\n"
                 f"1. Synthesize quantitative momentum delta_bps (60% weight) with live acquired macro headlines (40% weight).\n"
                 f"2. Output valid JSON containing exact rate, timestamp, delta_bps, direction, signal, confidence, verbatim rate quote, verbatim macro quote, and rationale.\n"
-                f"3. Strict Anti-Contradiction: If delta_bps <= -25 (DOWNWARD), signal MUST NOT be BULLISH. If delta_bps >= +25 (UPWARD), signal MUST NOT be BEARISH.\n"
+                f"3. Strict Consensus Grounding:\n"
+                f"   - If status is CALIBRATED_GENESIS (delta_bps is 0), signal MUST be NEUTRAL.\n"
+                f"   - If delta_bps >= +25 (UPWARD), signal MUST be BULLISH.\n"
+                f"   - If delta_bps <= -25 (DOWNWARD), signal MUST be BEARISH.\n"
+                f"   - If -25 < delta_bps < +25, signal is NEUTRAL.\n"
                 f"4. The macro_quote MUST be an exact excerpt from the Acquired Live Macro Headlines listed above."
             )
 
@@ -317,7 +323,7 @@ class ForexSentimentOracle(gl.Contract):
                 f"'round_id' (set to integer {target_pair_round_id}), 'pair' (string '{clean_pair}'), 'rate' (string float), "
                 f"'timestamp' (integer Unix timestamp of the rate), 'baseline_rate' (string float), 'delta_bps' (integer), "
                 f"'direction' ('UPWARD', 'DOWNWARD', or 'CONSOLIDATION'), 'signal' ('BULLISH', 'BEARISH', or 'NEUTRAL'), "
-                f"'confidence' (integer 50-100), 'rate_quote' (verbatim quote of rate and timestamp), "
+                f"'confidence' (integer 50-100), 'rate_quote' (quote containing the exact rate number), "
                 f"'macro_quote' (verbatim quote from acquired macro headlines), "
                 f"'rationale' (concise 1-2 sentence explanation synthesizing rate momentum and acquired macro evidence), "
                 f"'status' ('RESOLVED' or 'CALIBRATED_GENESIS')."
@@ -326,8 +332,12 @@ class ForexSentimentOracle(gl.Contract):
                 1. Output must be valid JSON with keys: 'round_id', 'pair', 'rate', 'timestamp', 'baseline_rate', 'delta_bps', 'direction', 'signal', 'confidence', 'rate_quote', 'macro_quote', 'rationale', 'status'.
                 2. The 'round_id' must be the exact integer {target_pair_round_id}.
                 3. The 'signal' must be exactly one of: BULLISH, BEARISH, or NEUTRAL, applying to the BASE currency.
-                4. Grounding Rule: If delta_bps <= -25 (DOWNWARD), signal MUST NOT be BULLISH. If delta_bps >= +25 (UPWARD), signal MUST NOT be BEARISH. If -25 < delta_bps < +25, signal must reflect live macro consensus or be NEUTRAL.
-                5. The 'rate_quote' must quote the exact rate number from Stream 1.
+                4. Grounding & Consensus Rules:
+                   - If status is CALIBRATED_GENESIS (delta_bps is 0), the signal MUST be NEUTRAL.
+                   - If delta_bps >= +25 (UPWARD), signal MUST be BULLISH.
+                   - If delta_bps <= -25 (DOWNWARD), signal MUST be BEARISH.
+                   - If -25 < delta_bps < +25, signal is NEUTRAL (or aligns with clear headline consensus).
+                5. The 'rate_quote' must contain the exact rate number from Stream 1.
                 6. The 'macro_quote' must be a direct verbatim excerpt from the acquired Stream 2 headlines.
                 7. The 'confidence' must be an integer between 50 and 100.
                 8. The 'timestamp' must be the exact Unix timestamp integer from Stream 1.
