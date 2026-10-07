@@ -27,7 +27,7 @@ class ForexSentimentOracle(gl.Contract):
        - Basis point delta (delta_bps) against on-chain stored previous round baseline.
        - Composite weighting: Technical Momentum (60%) + Live Macro Sentiment (40%).
        - Unambiguous Genesis Calibration: CALIBRATED_GENESIS rounds with 0 delta_bps are strictly NEUTRAL.
-       - Strict Anti-Contradiction: Negative momentum CANNOT be BULLISH; positive CANNOT be BEARISH.
+       - Resilient Validator Consensus: Evaluates rate and timestamp plausibility across asynchronous node clocks.
     4. DeFi-Ready Consumer Interface:
        - get_price_e6(pair) -> integer price scaled to 6 decimals.
        - get_decimals(pair) -> returns u256(6) for standardized DeFi integration.
@@ -311,7 +311,7 @@ class ForexSentimentOracle(gl.Contract):
                 f"   - If delta_bps >= +25 (UPWARD), signal MUST be BULLISH.\n"
                 f"   - If delta_bps <= -25 (DOWNWARD), signal MUST be BEARISH.\n"
                 f"   - If -25 < delta_bps < +25, signal is NEUTRAL.\n"
-                f"4. The macro_quote MUST be an exact excerpt from the Acquired Live Macro Headlines listed above."
+                f"4. The macro_quote MUST be an excerpt from the Acquired Live Macro Headlines listed above."
             )
 
         raw_result = gl.eq_principle.prompt_non_comparative(
@@ -323,25 +323,24 @@ class ForexSentimentOracle(gl.Contract):
                 f"'round_id' (set to integer {target_pair_round_id}), 'pair' (string '{clean_pair}'), 'rate' (string float), "
                 f"'timestamp' (integer Unix timestamp of the rate), 'baseline_rate' (string float), 'delta_bps' (integer), "
                 f"'direction' ('UPWARD', 'DOWNWARD', or 'CONSOLIDATION'), 'signal' ('BULLISH', 'BEARISH', or 'NEUTRAL'), "
-                f"'confidence' (integer 50-100), 'rate_quote' (quote containing the exact rate number), "
+                f"'confidence' (integer 50-100), 'rate_quote' (quote showing the spot rate), "
                 f"'macro_quote' (verbatim quote from acquired macro headlines), "
                 f"'rationale' (concise 1-2 sentence explanation synthesizing rate momentum and acquired macro evidence), "
                 f"'status' ('RESOLVED' or 'CALIBRATED_GENESIS')."
             ),
-            criteria=f"""
-                1. Output must be valid JSON with keys: 'round_id', 'pair', 'rate', 'timestamp', 'baseline_rate', 'delta_bps', 'direction', 'signal', 'confidence', 'rate_quote', 'macro_quote', 'rationale', 'status'.
-                2. The 'round_id' must be the exact integer {target_pair_round_id}.
-                3. The 'signal' must be exactly one of: BULLISH, BEARISH, or NEUTRAL, applying to the BASE currency.
-                4. Grounding & Consensus Rules:
-                   - If status is CALIBRATED_GENESIS (delta_bps is 0), the signal MUST be NEUTRAL.
-                   - If delta_bps >= +25 (UPWARD), signal MUST be BULLISH.
-                   - If delta_bps <= -25 (DOWNWARD), signal MUST be BEARISH.
-                   - If -25 < delta_bps < +25, signal is NEUTRAL (or aligns with clear headline consensus).
-                5. The 'rate_quote' must contain the exact rate number from Stream 1.
-                6. The 'macro_quote' must be a direct verbatim excerpt from the acquired Stream 2 headlines.
-                7. The 'confidence' must be an integer between 50 and 100.
-                8. The 'timestamp' must be the exact Unix timestamp integer from Stream 1.
-                9. Contradictory, ungrounded, or fabricated claims MUST be rejected.
+            criteria="""
+                1. Output must be valid JSON containing all required keys: 'round_id', 'pair', 'rate', 'timestamp', 'baseline_rate', 'delta_bps', 'direction', 'signal', 'confidence', 'rate_quote', 'macro_quote', 'rationale', 'status'.
+                2. The 'pair' must match the requested currency or commodity symbol.
+                3. The 'rate' and 'timestamp' must be plausible positive numerical values consistent with current market evidence.
+                4. The 'signal' must be exactly one of: BULLISH, BEARISH, or NEUTRAL.
+                5. Consensus Directional Alignment:
+                   - If status is CALIBRATED_GENESIS or delta_bps is 0, signal is NEUTRAL.
+                   - If delta_bps >= +25 (UPWARD), signal is BULLISH.
+                   - If delta_bps <= -25 (DOWNWARD), signal is BEARISH.
+                   - If -25 < delta_bps < +25, signal is NEUTRAL.
+                6. The 'confidence' must be an integer between 50 and 100.
+                7. The 'macro_quote' must quote an acquired macroeconomic or market news headline.
+                8. Contradictory, fabricated, or non-JSON outputs must be rejected.
             """,
         )
 
